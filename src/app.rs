@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::fs::File;
 use std::io;
 use std::io::Write;
 
@@ -14,7 +15,7 @@ use termion::screen::{ToAlternateScreen, ToMainScreen};
 use crate::flatjson;
 use crate::input::TuiEvent;
 use crate::input::TuiEvent::{KeyEvent, MouseEvent, WinChEvent};
-use crate::jsonstringunescaper::unescape_json_string;
+use crate::jsonstringunescaper::{safe_unescape_json_string, UnescapeError};
 use crate::lineprinter::JS_IDENTIFIER;
 use crate::options::{DataFormat, Opt};
 use crate::screenwriter::{MessageSeverity, ScreenWriter};
@@ -63,11 +64,23 @@ enum ContentTarget {
     QueryPath,
 }
 
+#[derive(Copy, Clone)]
+enum WriteFormat {
+    Json,
+    #[cfg(feature = "sexp")]
+    Sexp,
+}
+
 enum Command {
     Quit,
     Help,
     SetShowLineNumber(Option<bool>),
     SetShowRelativeLineNumber(Option<bool>),
+    WriteFile {
+        filename: String,
+        overwrite_existing: bool,
+        write_format: WriteFormat,
+    },
     Unknown,
 }
 
@@ -162,6 +175,28 @@ impl App {
                     self.draw_screen();
                     self.message = None;
                 }
+                continue;
+            }
+
+            // If the user hits Ctrl-z, we don't modify state at all, just send SIGSTOP to
+            // ourself, then loop around and process the next input.
+            if matches!(event, KeyEvent(Key::Ctrl('z'))) {
+                // Restore terminal prior to suspending.
+                let _ = self.screen_writer.stdout.suspend_raw_mode();
+                let _ = write!(self.screen_writer.stdout, "{DISABLE_MOUSE_BUTTON_TRACKING}");
+                let _ = write!(self.screen_writer.stdout, "{ToMainScreen}");
+                let _ = write!(self.screen_writer.stdout, "{}", termion::cursor::Show);
+                let _ = self.screen_writer.stdout.flush();
+                unsafe {
+                    libc::kill(0, libc::SIGSTOP);
+                }
+                // Re-enable all the terminal settings.
+                let _ = write!(self.screen_writer.stdout, "{}", termion::cursor::Hide);
+                let _ = write!(self.screen_writer.stdout, "{ToAlternateScreen}");
+                let _ = write!(self.screen_writer.stdout, "{ENABLE_MOUSE_BUTTON_TRACKING}");
+                let _ = self.screen_writer.stdout.activate_raw_mode();
+                // I'm not exactly sure why we have to do this.
+                self.draw_screen();
                 continue;
             }
 
@@ -461,6 +496,17 @@ impl App {
                                         self.screen_writer.show_relative_line_numbers =
                                             !self.screen_writer.show_relative_line_numbers
                                     }
+                                    Command::WriteFile {
+                                        filename,
+                                        overwrite_existing,
+                                        write_format,
+                                    } => {
+                                        self.write_contents_to_file(
+                                            filename,
+                                            overwrite_existing,
+                                            write_format,
+                                        );
+                                    }
                                     Command::Unknown => {
                                         self.set_warning_message(format!(
                                             "Unknown command: {command}"
@@ -703,15 +749,42 @@ impl App {
     }
 
     fn parse_command(command: &str) -> Command {
-        match command {
-            "h" | "he" | "hel" | "help" => Command::Help,
-            "q" | "qu" | "qui" | "quit" | "quit()" | "exit" | "exit()" => Command::Quit,
-            "set number" => Command::SetShowLineNumber(Some(true)),
-            "set number!" => Command::SetShowLineNumber(None),
-            "set nonumber" => Command::SetShowLineNumber(Some(false)),
-            "set relativenumber" => Command::SetShowRelativeLineNumber(Some(true)),
-            "set relativenumber!" => Command::SetShowRelativeLineNumber(None),
-            "set norelativenumber" => Command::SetShowRelativeLineNumber(Some(false)),
+        let args: Vec<&str> = command.split(" ").filter(|s| !s.is_empty()).collect();
+
+        match args.as_slice() {
+            ["h" | "help"] => Command::Help,
+            ["q" | "quit" | "quit()" | "exit" | "exit()"] => Command::Quit,
+            ["set", arg] => match *arg {
+                "number" => Command::SetShowLineNumber(Some(true)),
+                "number!" => Command::SetShowLineNumber(None),
+                "nonumber" => Command::SetShowLineNumber(Some(false)),
+                "relativenumber" => Command::SetShowRelativeLineNumber(Some(true)),
+                "relativenumber!" => Command::SetShowRelativeLineNumber(None),
+                "norelativenumber" => Command::SetShowRelativeLineNumber(Some(false)),
+                _ => Command::Unknown,
+            },
+            ["w" | "write", filename] => Command::WriteFile {
+                filename: filename.to_string(),
+                overwrite_existing: false,
+                write_format: WriteFormat::Json,
+            },
+            ["w!" | "write!", filename] => Command::WriteFile {
+                filename: filename.to_string(),
+                overwrite_existing: true,
+                write_format: WriteFormat::Json,
+            },
+            #[cfg(feature = "sexp")]
+            ["ws" | "writesexp", filename] => Command::WriteFile {
+                filename: filename.to_string(),
+                overwrite_existing: false,
+                write_format: WriteFormat::Sexp,
+            },
+            #[cfg(feature = "sexp")]
+            ["ws!" | "writesexp!", filename] => Command::WriteFile {
+                filename: filename.to_string(),
+                overwrite_existing: true,
+                write_format: WriteFormat::Sexp,
+            },
             _ => Command::Unknown,
         }
     }
@@ -764,7 +837,7 @@ impl App {
                 let quoteless_range = (range.start + 1)..(range.end - 1);
                 let string_value = &json[quoteless_range];
 
-                match unescape_json_string(string_value) {
+                match safe_unescape_json_string(string_value) {
                     Ok(unescaped) => unescaped,
                     Err(err) => {
                         return Err(format!("{err}"));
@@ -868,6 +941,44 @@ impl App {
             Err(err) => {
                 self.set_warning_message(err);
                 false
+            }
+        }
+    }
+
+    fn write_contents_to_file(
+        &mut self,
+        filename: String,
+        overwrite_existing: bool,
+        write_format: WriteFormat,
+    ) {
+        let mut file_open_options = File::options();
+        file_open_options
+            .read(true)
+            .write(true)
+            .create_new(!overwrite_existing);
+
+        match file_open_options.open(&filename) {
+            Err(err) => match err.kind() {
+                io::ErrorKind::AlreadyExists => self
+                    .set_error_message(format!("{filename} already exists (add ! to overwrite)")),
+                _ => self.set_error_message(format!("Error opening file for writing: {err}")),
+            },
+            Ok(mut file) => {
+                let file_contents: Result<String, UnescapeError> = match write_format {
+                    WriteFormat::Json => Ok(self.viewer.flatjson.pretty_printed()),
+                    #[cfg(feature = "sexp")]
+                    WriteFormat::Sexp => self.viewer.flatjson.sexp_string(),
+                };
+
+                match file_contents {
+                    Err(err) => {
+                        self.set_error_message(format!("Error formatting file contents: {err}"))
+                    }
+                    Ok(file_contents) => match file.write_all(file_contents.as_bytes()) {
+                        Ok(()) => self.set_info_message(format!("{filename} written")),
+                        Err(err) => self.set_error_message(format!("Error writing file: {err}")),
+                    },
+                }
             }
         }
     }

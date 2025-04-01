@@ -1,7 +1,16 @@
 main
 ====
 
-No changes yet!
+Improvements:
+- [Issue #143]: `ctrl-z` will now send jless to the background
+- `:w[rite] <file>` and `:w[rite]! <file>` can be used to write the
+  current input to a file
+- Add a `sexp` feature to gate functionality only used for support of
+  [OCaml style S-expressions](https://github.com/janestreet/sexplib), or
+  sexps.
+- [feature = "sexp"]: Add `:writesexp <file>` (also `:ws`) functions for
+  writing current input as a sexp to a file. This is a temporary
+  addition and will be removed once proper sexp support is added.
 
 v0.9.0 (2023-07-16)
 ==================
@@ -45,7 +54,7 @@ New features:
   before the desired one will be focused. When using `<count>G`
   (uppercase 'G'), all the ancestors of the desired line will be
   expanded to ensure it is visible.
-- Add `C` and `E` commands, analagous to the existing `c` and `e`
+- Add `C` and `E` commands, analogous to the existing `c` and `e`
   commands, to deeply collapse/expand a node and all its siblings.
 
 Improvements:
