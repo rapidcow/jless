@@ -78,12 +78,12 @@ use crate::viewer::Mode;
 //                     "d": >|
 //                          >|
 
-const FOCUSED_LINE: &str = "▶ ";
+const FOCUSED_LINE: &str = "► ";
 const NOT_FOCUSED_LINE: &str = "  ";
-const FOCUSED_COLLAPSED_CONTAINER: &str = "▶ ";
+const FOCUSED_COLLAPSED_CONTAINER: &str = "► ";
 const FOCUSED_EXPANDED_CONTAINER: &str = "▼ ";
-const COLLAPSED_CONTAINER: &str = "▷ ";
-const EXPANDED_CONTAINER: &str = "▽ ";
+const COLLAPSED_CONTAINER: &str = "> ";
+const EXPANDED_CONTAINER: &str = "v ";
 const INDICATOR_WIDTH: isize = 2;
 const NO_FOCUSED_MATCH: Range<usize> = 0..0;
 
